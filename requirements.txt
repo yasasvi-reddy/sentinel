@@ -1,0 +1,11 @@
+earthengine-api
+rasterio
+geopandas
+torch
+torchvision
+numpy
+pandas
+matplotlib
+streamlit
+pillow
+scikit-learn
