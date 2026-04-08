@@ -1,32 +1,43 @@
 """
 fetch_imagery.py
 
-Pulls Sentinel-2 true color composite for a test AOI in Ukraine
-over a 3-month window (Jun–Aug 2023) and saves a PNG to data/.
+Pulls Sentinel-2 true color composite for Kharkiv, Ukraine
+over a 3-month window (Jun–Aug 2023), applies pixel-level cloud masking
+via the S2 QA60 band, and saves a PNG to data/.
 """
 
 import os
 import io
 import requests
-import numpy as np
-import matplotlib.pyplot as plt
 from PIL import Image
 import ee
 
 # ── Auth & init ────────────────────────────────────────────────────────────────
-# Credentials already saved via `earthengine authenticate` CLI
-ee.Initialize()
+GEE_PROJECT = "project-8232277e-d8ce-4a1f-bc6"
+ee.Initialize(project=GEE_PROJECT)
 
 # ── Parameters ────────────────────────────────────────────────────────────────
-# Test AOI: central Kharkiv, Ukraine
+# AOI: central Kharkiv, Ukraine
 AOI = ee.Geometry.Rectangle([36.15, 49.95, 36.40, 50.10])
 
 START_DATE = "2023-06-01"
 END_DATE   = "2023-08-31"
-CLOUD_THR  = 20          # max cloud cover %
+CLOUD_THR  = 20          # scene-level pre-filter (%)
 
 OUT_DIR    = os.path.join(os.path.dirname(__file__), "..", "data")
 OUT_FILE   = os.path.join(OUT_DIR, "kharkiv_true_color_2023.png")
+
+
+# ── Pixel-level cloud mask ─────────────────────────────────────────────────────
+def mask_s2_clouds(image):
+    """Mask clouds and cirrus using the Sentinel-2 QA60 bitmask band."""
+    qa = image.select("QA60")
+    cloud_bit  = 1 << 10   # bit 10: opaque clouds
+    cirrus_bit = 1 << 11   # bit 11: cirrus
+    mask = qa.bitwiseAnd(cloud_bit).eq(0).And(
+           qa.bitwiseAnd(cirrus_bit).eq(0))
+    return image.updateMask(mask)
+
 
 # ── Build composite ───────────────────────────────────────────────────────────
 s2 = (
@@ -34,6 +45,7 @@ s2 = (
     .filterBounds(AOI)
     .filterDate(START_DATE, END_DATE)
     .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", CLOUD_THR))
+    .map(mask_s2_clouds)
     .select(["B4", "B3", "B2"])   # Red, Green, Blue
     .median()
     .clip(AOI)
@@ -63,13 +75,4 @@ os.makedirs(OUT_DIR, exist_ok=True)
 img.save(OUT_FILE)
 print(f"Saved: {OUT_FILE}")
 
-# ── Display ───────────────────────────────────────────────────────────────────
-fig, ax = plt.subplots(figsize=(8, 8))
-ax.imshow(np.array(img))
-ax.set_title(
-    f"Sentinel-2 True Color — Kharkiv, Ukraine\n{START_DATE} to {END_DATE}",
-    fontsize=13,
-)
-ax.axis("off")
-plt.tight_layout()
-plt.show()
+print(f"Done. Saved to {OUT_FILE}")
