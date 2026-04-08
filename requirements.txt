@@ -9,3 +9,5 @@ matplotlib
 streamlit
 pillow
 scikit-learn
+segmentation-models-pytorch
+albumentations
