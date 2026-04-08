@@ -81,6 +81,18 @@ def build_composite(aoi: ee.Geometry, start: str, end: str) -> ee.Image:
 
 
 def get_drive_service():
+    # Prefer Application Default Credentials (gcloud auth application-default login)
+    try:
+        import google.auth
+        creds, _ = google.auth.default(
+            scopes=["https://www.googleapis.com/auth/drive"]
+        )
+        creds.refresh(Request())
+        return gdrive_build("drive", "v3", credentials=creds)
+    except Exception:
+        pass
+
+    # Fall back to earthengine stored credentials with full drive scope
     creds_path = Path.home() / ".config" / "earthengine" / "credentials"
     stored     = json.loads(creds_path.read_text())
     creds = Credentials(
@@ -89,7 +101,7 @@ def get_drive_service():
         token_uri="https://oauth2.googleapis.com/token",
         client_id=CLIENT_ID,
         client_secret=CLIENT_SECRET,
-        scopes=["https://www.googleapis.com/auth/drive.readonly"],
+        scopes=["https://www.googleapis.com/auth/drive"],  # full drive, not readonly
     )
     creds.refresh(Request())
     return gdrive_build("drive", "v3", credentials=creds)

@@ -76,6 +76,7 @@ def load_geotiff(path: Path):
         data = src.read([1, 2, 3]).astype(np.float32).transpose(1, 2, 0)
         transform = src.transform
         crs       = src.crs
+    data = np.nan_to_num(data, nan=0.0)   # NoData pixels → 0
     data = np.clip(data / 3000.0, 0.0, 1.0)
     return data, transform, crs
 
