@@ -11,3 +11,6 @@ pillow
 scikit-learn
 segmentation-models-pytorch
 albumentations
+fastapi==0.115.12
+uvicorn[standard]
+shapely
