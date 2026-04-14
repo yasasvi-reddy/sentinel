@@ -1,25 +1,9 @@
 """
 temporal_vit.py
 
-Compact Vision Transformer for temporal damage change detection.
-
-Architecture
-────────────
-Input  : (B, 2, 256, 256)  — [pre_prob, post_prob] damage maps from U-Net
-Output : (B, 3, 256, 256)  — per-pixel class logits
-
-Classes
-  0 : Undamaged   — UNOSAT = 0
-  1 : Newly damaged — UNOSAT = 1  AND  pre_prob < PRE_THRESH
-  2 : Pre-existing  — UNOSAT = 1  AND  pre_prob ≥ PRE_THRESH
-      (areas the U-Net was already activating on before the invasion;
-       captures stable structural features that resemble damage signal)
-
-Design choices
-  • Patch size 16 → 16×16 = 256 sequence tokens per image
-  • Embed dim 192, depth 4, heads 6  (compact for 391-patch dataset)
-  • Dense prediction head: each token → 3 × 16 × 16 logits → reshape
-  • Learnable 2D positional embeddings
+Vision Transformer for temporal damage classification.
+Takes a 2-channel input (pre-war U-Net probability map + post-war U-Net probability map)
+and outputs per-image class logits (3 classes: 0=undamaged, 1=newly damaged, 2=pre-existing).
 """
 
 import math
@@ -27,135 +11,135 @@ import torch
 import torch.nn as nn
 
 
-PRE_THRESH = 0.40   # pre_prob threshold for "pre-existing" label derivation
-
-
-# ── Label derivation ──────────────────────────────────────────────────────────
-def derive_labels(pre_prob: torch.Tensor,
-                  unosat_mask: torch.Tensor,
-                  threshold: float = PRE_THRESH) -> torch.Tensor:
-    """
-    Args:
-        pre_prob    : (H, W) float in [0,1] — U-Net output on pre-war imagery
-        unosat_mask : (H, W) binary float  — UNOSAT damage ground truth
-        threshold   : pre-war probability above which → 'pre-existing'
-    Returns:
-        labels : (H, W) long  — 0=undamaged, 1=newly damaged, 2=pre-existing
-    """
-    mask = unosat_mask.bool()
-    pre_high = pre_prob >= threshold
-
-    labels = torch.zeros_like(unosat_mask, dtype=torch.long)
-    labels[mask & ~pre_high] = 1   # UNOSAT=1 & pre low  → newly damaged
-    labels[mask &  pre_high] = 2   # UNOSAT=1 & pre high → pre-existing
-    return labels
-
-
-# ── Patch embedding ───────────────────────────────────────────────────────────
 class PatchEmbed(nn.Module):
-    def __init__(self, in_channels=2, patch_size=16, embed_dim=192):
+    def __init__(self, img_size: int, patch_size: int, in_channels: int, embed_dim: int):
         super().__init__()
-        self.patch_size = patch_size
-        self.proj = nn.Conv2d(in_channels, embed_dim,
-                              kernel_size=patch_size, stride=patch_size)
+        self.num_patches = (img_size // patch_size) ** 2
+        self.proj = nn.Conv2d(in_channels, embed_dim, kernel_size=patch_size, stride=patch_size)
 
     def forward(self, x):
-        # x: (B, C, H, W) → (B, embed_dim, H/P, W/P) → (B, N, embed_dim)
+        # x: (B, C, H, W) → (B, num_patches, embed_dim)
+        x = self.proj(x)                        # (B, embed_dim, H/P, W/P)
+        x = x.flatten(2).transpose(1, 2)        # (B, num_patches, embed_dim)
+        return x
+
+
+class Attention(nn.Module):
+    def __init__(self, embed_dim: int, num_heads: int, dropout: float = 0.0):
+        super().__init__()
+        self.num_heads = num_heads
+        self.head_dim  = embed_dim // num_heads
+        self.scale     = self.head_dim ** -0.5
+        self.qkv  = nn.Linear(embed_dim, embed_dim * 3, bias=True)
+        self.proj = nn.Linear(embed_dim, embed_dim)
+        self.attn_drop = nn.Dropout(dropout)
+        self.proj_drop = nn.Dropout(dropout)
+
+    def forward(self, x):
+        B, N, C = x.shape
+        qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
+        q, k, v = qkv.unbind(0)
+        attn = (q @ k.transpose(-2, -1)) * self.scale
+        attn = attn.softmax(dim=-1)
+        attn = self.attn_drop(attn)
+        x = (attn @ v).transpose(1, 2).reshape(B, N, C)
         x = self.proj(x)
-        B, E, Hg, Wg = x.shape
-        x = x.flatten(2).transpose(1, 2)   # (B, N, E)
-        return x, Hg, Wg
+        x = self.proj_drop(x)
+        return x
 
 
-# ── Transformer block ─────────────────────────────────────────────────────────
+class MLP(nn.Module):
+    def __init__(self, embed_dim: int, mlp_ratio: float, dropout: float = 0.0):
+        super().__init__()
+        hidden = int(embed_dim * mlp_ratio)
+        self.fc1  = nn.Linear(embed_dim, hidden)
+        self.act  = nn.GELU()
+        self.fc2  = nn.Linear(hidden, embed_dim)
+        self.drop = nn.Dropout(dropout)
+
+    def forward(self, x):
+        return self.drop(self.fc2(self.drop(self.act(self.fc1(x)))))
+
+
 class TransformerBlock(nn.Module):
-    def __init__(self, embed_dim, num_heads, mlp_ratio=4.0, dropout=0.1):
+    def __init__(self, embed_dim: int, num_heads: int, mlp_ratio: float, dropout: float):
         super().__init__()
         self.norm1 = nn.LayerNorm(embed_dim)
-        self.attn  = nn.MultiheadAttention(embed_dim, num_heads,
-                                            dropout=dropout, batch_first=True)
-        self.norm2  = nn.LayerNorm(embed_dim)
-        hidden      = int(embed_dim * mlp_ratio)
-        self.mlp    = nn.Sequential(
-            nn.Linear(embed_dim, hidden),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden, embed_dim),
-            nn.Dropout(dropout),
-        )
+        self.attn  = Attention(embed_dim, num_heads, dropout)
+        self.norm2 = nn.LayerNorm(embed_dim)
+        self.mlp   = MLP(embed_dim, mlp_ratio, dropout)
 
     def forward(self, x):
-        n = self.norm1(x)
-        x = x + self.attn(n, n, n)[0]
+        x = x + self.attn(self.norm1(x))
         x = x + self.mlp(self.norm2(x))
         return x
 
 
-# ── Dense prediction head ─────────────────────────────────────────────────────
-class DenseHead(nn.Module):
-    """
-    Each patch token → 3 × patch_size^2 values → reshape to (B, 3, H, W).
-    """
-    def __init__(self, embed_dim, patch_size, num_classes=3):
-        super().__init__()
-        self.patch_size  = patch_size
-        self.num_classes = num_classes
-        self.head = nn.Sequential(
-            nn.LayerNorm(embed_dim),
-            nn.Linear(embed_dim, num_classes * patch_size * patch_size),
-        )
-
-    def forward(self, tokens, Hg, Wg):
-        # tokens: (B, N, E)
-        B, N, _ = tokens.shape
-        P        = self.patch_size
-        C        = self.num_classes
-
-        out = self.head(tokens)                         # (B, N, C*P*P)
-        out = out.view(B, Hg, Wg, C, P, P)
-        out = out.permute(0, 3, 1, 4, 2, 5).contiguous()
-        out = out.view(B, C, Hg * P, Wg * P)           # (B, C, H, W)
-        return out
-
-
-# ── Full model ────────────────────────────────────────────────────────────────
 class TemporalViT(nn.Module):
     """
-    Vision Transformer for temporal damage change detection.
-    Takes stacked [pre_prob, post_prob] maps and outputs 3-class logits.
+    Vision Transformer for temporal war-damage classification.
+
+    Parameters
+    ----------
+    img_size    : spatial size of input patches (square)
+    patch_size  : size of each patch token
+    in_channels : number of input channels (2 = pre_prob + post_prob)
+    num_classes : number of output classes (3)
+    embed_dim   : token embedding dimension
+    depth       : number of transformer blocks
+    num_heads   : attention heads per block
+    mlp_ratio   : MLP hidden-dim multiplier
+    dropout     : dropout rate
     """
 
-    def __init__(self,
-                 img_size    = 256,
-                 patch_size  = 16,
-                 in_channels = 2,
-                 num_classes = 3,
-                 embed_dim   = 192,
-                 depth       = 4,
-                 num_heads   = 6,
-                 mlp_ratio   = 4.0,
-                 dropout     = 0.1):
+    def __init__(
+        self,
+        img_size:    int   = 256,
+        patch_size:  int   = 16,
+        in_channels: int   = 2,
+        num_classes: int   = 3,
+        embed_dim:   int   = 192,
+        depth:       int   = 4,
+        num_heads:   int   = 6,
+        mlp_ratio:   float = 4.0,
+        dropout:     float = 0.1,
+    ):
         super().__init__()
-        self.patch_embed = PatchEmbed(in_channels, patch_size, embed_dim)
+        self.patch_embed = PatchEmbed(img_size, patch_size, in_channels, embed_dim)
+        num_patches = self.patch_embed.num_patches
 
-        n_patches = (img_size // patch_size) ** 2
-        self.pos_embed = nn.Parameter(
-            torch.zeros(1, n_patches, embed_dim)
-        )
-        nn.init.trunc_normal_(self.pos_embed, std=0.02)
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
+        self.pos_embed = nn.Parameter(torch.zeros(1, num_patches + 1, embed_dim))
+        self.pos_drop  = nn.Dropout(dropout)
 
-        self.dropout = nn.Dropout(dropout)
-
-        self.blocks = nn.ModuleList([
+        self.blocks = nn.Sequential(*[
             TransformerBlock(embed_dim, num_heads, mlp_ratio, dropout)
             for _ in range(depth)
         ])
+        self.norm = nn.LayerNorm(embed_dim)
+        self.head = nn.Linear(embed_dim, num_classes)
 
-        self.head = DenseHead(embed_dim, patch_size, num_classes)
+        self._init_weights()
+
+    def _init_weights(self):
+        nn.init.trunc_normal_(self.pos_embed, std=0.02)
+        nn.init.trunc_normal_(self.cls_token, std=0.02)
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.trunc_normal_(m.weight, std=0.02)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+            elif isinstance(m, nn.LayerNorm):
+                nn.init.ones_(m.weight)
+                nn.init.zeros_(m.bias)
 
     def forward(self, x):
-        tokens, Hg, Wg = self.patch_embed(x)
-        tokens = self.dropout(tokens + self.pos_embed)
-        for blk in self.blocks:
-            tokens = blk(tokens)
-        return self.head(tokens, Hg, Wg)   # (B, 3, H, W)
+        # x: (B, 2, H, W) — stacked pre/post probability maps
+        B = x.shape[0]
+        x = self.patch_embed(x)                                  # (B, N, D)
+        cls = self.cls_token.expand(B, -1, -1)                   # (B, 1, D)
+        x   = torch.cat([cls, x], dim=1)                         # (B, N+1, D)
+        x   = self.pos_drop(x + self.pos_embed)
+        x   = self.blocks(x)
+        x   = self.norm(x)
+        return self.head(x[:, 0])                                 # (B, num_classes)

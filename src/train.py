@@ -1,267 +1,180 @@
 """
-train.py
+train.py — U-Net binary damage segmentation
 
-Training pipeline for Sentinel-2 war damage segmentation.
+Input : concat(pre_rgb, post_rgb) normalised to [0,1]  →  (6, 256, 256)
+Target: binary mask from masks/  →  0 = undamaged, 1 = damaged
+Loss  : BCEWithLogitsLoss + soft-Dice
+Saves : models/unet_resnet34_best.pth  (best val loss)
 
-Model   : U-Net with pretrained ResNet-34 encoder (segmentation_models_pytorch)
-Input   : 6-channel (pre-war RGB + post-war RGB), 256×256 patches
-Target  : binary damage mask
-Loss    : Focal loss + Dice loss (combined for class imbalance)
-Device  : MPS (Apple Silicon) → CUDA → CPU
+Run:
+    python src/train.py
 """
 
-import time
+import os, sys, random, time
 from pathlib import Path
 
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from torch.utils.data import DataLoader
+import torch.optim as optim
+from PIL import Image
+from torch.utils.data import Dataset, DataLoader
+
+ROOT      = Path(__file__).parent.parent
+sys.path.insert(0, str(ROOT / "src"))
+
 import segmentation_models_pytorch as smp
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 
-from dataset import make_splits, DamageDataset
+PATCHES_DIR = ROOT / "data" / "patches"
+MODEL_OUT   = ROOT / "models" / "unet_resnet34_best.pth"
+MODEL_OUT.parent.mkdir(parents=True, exist_ok=True)
 
-# ── Paths ──────────────────────────────────────────────────────────────────────
-ROOT       = Path(__file__).parent.parent
-MODEL_DIR  = ROOT / "models"
-RESULTS_DIR = ROOT / "results"
-MODEL_DIR.mkdir(exist_ok=True)
-RESULTS_DIR.mkdir(exist_ok=True)
+DEVICE = (torch.device("mps")  if torch.backends.mps.is_available() else
+          torch.device("cuda") if torch.cuda.is_available() else
+          torch.device("cpu"))
 
-CKPT_PATH  = MODEL_DIR / "unet_resnet34_best.pth"
-CURVE_PATH = RESULTS_DIR / "loss_curves.png"
-
-# ── Hyperparameters ────────────────────────────────────────────────────────────
-EPOCHS     = 60
-BATCH_SIZE = 8
+EPOCHS     = 30
+BATCH      = 8
 LR         = 3e-4
-VAL_FRAC   = 0.2
+VAL_SPLIT  = 0.15
 SEED       = 42
 
-# Focal loss params
-FOCAL_ALPHA = 0.75   # weight for positive class (damaged) — higher because it's minority
-FOCAL_GAMMA = 2.0
-
-# Loss blend
-FOCAL_WEIGHT = 0.6
-DICE_WEIGHT  = 0.4
+random.seed(SEED); np.random.seed(SEED); torch.manual_seed(SEED)
 
 
-# ── Device ─────────────────────────────────────────────────────────────────────
-def get_device():
-    if torch.backends.mps.is_available():
-        return torch.device("mps")
-    if torch.cuda.is_available():
-        return torch.device("cuda")
-    return torch.device("cpu")
+# ── Dataset ───────────────────────────────────────────────────────────────────
+class PatchDataset(Dataset):
+    def __init__(self, samples, augment=False):
+        self.samples = samples
+        self.augment = augment
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        pre_p, post_p, mask_p = self.samples[idx]
+        pre  = np.array(Image.open(pre_p),  dtype=np.float32) / 255.0
+        post = np.array(Image.open(post_p), dtype=np.float32) / 255.0
+        mask = (np.array(Image.open(mask_p), dtype=np.float32) > 127).astype(np.float32)
+
+        # Random augmentations
+        if self.augment:
+            if random.random() > 0.5:
+                pre  = pre[:, ::-1, :].copy()
+                post = post[:, ::-1, :].copy()
+                mask = mask[:, ::-1].copy()
+            if random.random() > 0.5:
+                pre  = pre[::-1, :, :].copy()
+                post = post[::-1, :, :].copy()
+                mask = mask[::-1, :].copy()
+            k = random.randint(0, 3)
+            if k:
+                pre  = np.rot90(pre,  k).copy()
+                post = np.rot90(post, k).copy()
+                mask = np.rot90(mask, k).copy()
+
+        # (6, H, W) input
+        x = np.concatenate([pre.transpose(2,0,1), post.transpose(2,0,1)], axis=0)
+        return torch.from_numpy(x), torch.from_numpy(mask).unsqueeze(0)
 
 
-# ── Loss functions ─────────────────────────────────────────────────────────────
-class FocalLoss(nn.Module):
-    def __init__(self, alpha: float = 0.25, gamma: float = 2.0):
-        super().__init__()
-        self.alpha = alpha
-        self.gamma = gamma
-
-    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-        bce  = F.binary_cross_entropy_with_logits(logits, targets, reduction="none")
-        pt   = torch.exp(-bce)
-        # alpha weights: alpha for positives, (1-alpha) for negatives
-        at   = self.alpha * targets + (1 - self.alpha) * (1 - targets)
-        loss = at * (1 - pt) ** self.gamma * bce
-        return loss.mean()
-
-
-class DiceLoss(nn.Module):
-    def __init__(self, smooth: float = 1.0):
-        super().__init__()
-        self.smooth = smooth
-
-    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-        probs = torch.sigmoid(logits)
-        intersection = (probs * targets).sum(dim=(1, 2, 3))
-        dice = (2 * intersection + self.smooth) / \
-               (probs.sum(dim=(1, 2, 3)) + targets.sum(dim=(1, 2, 3)) + self.smooth)
-        return 1 - dice.mean()
+def collect_samples():
+    samples = []
+    for city in ["kharkiv", "mariupol"]:
+        city_dir = PATCHES_DIR / city
+        pre_dir  = city_dir / "pre"
+        post_dir = city_dir / "post"
+        mask_dir = city_dir / "masks"
+        if not pre_dir.exists():
+            continue
+        for fname in sorted(os.listdir(pre_dir)):
+            stem = fname.replace(".png", "")
+            pre_p  = pre_dir  / fname
+            post_p = post_dir / fname
+            mask_p = mask_dir / fname
+            if post_p.exists() and mask_p.exists():
+                samples.append((pre_p, post_p, mask_p))
+    return samples
 
 
-class CombinedLoss(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.focal = FocalLoss(alpha=FOCAL_ALPHA, gamma=FOCAL_GAMMA)
-        self.dice  = DiceLoss()
-
-    def forward(self, logits, targets):
-        return FOCAL_WEIGHT * self.focal(logits, targets) + \
-               DICE_WEIGHT  * self.dice(logits, targets)
+# ── Dice loss ─────────────────────────────────────────────────────────────────
+def dice_loss(pred, target, smooth=1.0):
+    pred   = torch.sigmoid(pred)
+    flat_p = pred.view(-1)
+    flat_t = target.view(-1)
+    inter  = (flat_p * flat_t).sum()
+    return 1.0 - (2.0 * inter + smooth) / (flat_p.sum() + flat_t.sum() + smooth)
 
 
-# ── Metrics ────────────────────────────────────────────────────────────────────
-@torch.no_grad()
-def compute_metrics(logits, targets, threshold=0.5):
-    preds = (torch.sigmoid(logits) > threshold).float()
-    tp = (preds * targets).sum().item()
-    fp = (preds * (1 - targets)).sum().item()
-    fn = ((1 - preds) * targets).sum().item()
-    iou       = tp / (tp + fp + fn + 1e-6)
-    precision = tp / (tp + fp + 1e-6)
-    recall    = tp / (tp + fn + 1e-6)
-    f1        = 2 * precision * recall / (precision + recall + 1e-6)
-    return {"iou": iou, "f1": f1, "precision": precision, "recall": recall}
+# ── Training loop ─────────────────────────────────────────────────────────────
+def train():
+    samples = collect_samples()
+    print(f"[train] Total patches: {len(samples)}")
+    random.shuffle(samples)
+    n_val  = max(1, int(len(samples) * VAL_SPLIT))
+    val_s, train_s = samples[:n_val], samples[n_val:]
+    print(f"[train] Train: {len(train_s)}  Val: {len(val_s)}  Device: {DEVICE}")
 
+    train_dl = DataLoader(PatchDataset(train_s, augment=True),  batch_size=BATCH, shuffle=True,  num_workers=0)
+    val_dl   = DataLoader(PatchDataset(val_s,   augment=False), batch_size=BATCH, shuffle=False, num_workers=0)
 
-# ── Training loop ──────────────────────────────────────────────────────────────
-def train_one_epoch(model, loader, optimizer, criterion, device):
-    model.train()
-    total_loss = 0.0
-    for images, masks in loader:
-        images, masks = images.to(device), masks.to(device)
-        optimizer.zero_grad()
-        logits = model(images)
-        loss   = criterion(logits, masks)
-        loss.backward()
-        optimizer.step()
-        total_loss += loss.item() * images.size(0)
-    return total_loss / len(loader.dataset)
-
-
-@torch.no_grad()
-def validate(model, loader, criterion, device):
-    model.eval()
-    total_loss = 0.0
-    all_metrics = {"iou": [], "f1": [], "precision": [], "recall": []}
-    for images, masks in loader:
-        images, masks = images.to(device), masks.to(device)
-        logits = model(images)
-        loss   = criterion(logits, masks)
-        total_loss += loss.item() * images.size(0)
-        m = compute_metrics(logits, masks)
-        for k, v in m.items():
-            all_metrics[k].append(v)
-    avg_metrics = {k: float(np.mean(v)) for k, v in all_metrics.items()}
-    return total_loss / len(loader.dataset), avg_metrics
-
-
-# ── Plot loss curves ───────────────────────────────────────────────────────────
-def plot_curves(train_losses, val_losses, val_ious, save_path):
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
-
-    epochs = range(1, len(train_losses) + 1)
-    ax1.plot(epochs, train_losses, label="Train loss", color="#2196F3")
-    ax1.plot(epochs, val_losses,   label="Val loss",   color="#F44336")
-    ax1.set_xlabel("Epoch"); ax1.set_ylabel("Loss")
-    ax1.set_title("Training & Validation Loss  (Focal + Dice)")
-    ax1.legend(); ax1.grid(alpha=0.3)
-
-    ax2.plot(epochs, val_ious, label="Val IoU", color="#4CAF50")
-    ax2.set_xlabel("Epoch"); ax2.set_ylabel("IoU")
-    ax2.set_title("Validation IoU")
-    ax2.legend(); ax2.grid(alpha=0.3)
-
-    best_epoch = int(np.argmin(val_losses)) + 1
-    ax1.axvline(best_epoch, color="gray", linestyle="--", alpha=0.6,
-                label=f"Best (ep {best_epoch})")
-    ax1.legend()
-
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=150, bbox_inches="tight")
-    print(f"Saved loss curves → {save_path}")
-
-
-# ── Main ───────────────────────────────────────────────────────────────────────
-def main():
-    device = get_device()
-    print(f"Device: {device}")
-
-    # ── Data ──────────────────────────────────────────────────────────────────
-    train_ids, val_ids = make_splits(val_frac=VAL_FRAC, seed=SEED)
-    print(f"Train: {len(train_ids)}  |  Val: {len(val_ids)}")
-
-    train_ds = DamageDataset(train_ids, augment=True)
-    val_ds   = DamageDataset(val_ids,   augment=False)
-
-    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE,
-                              shuffle=True,  num_workers=0, pin_memory=False)
-    val_loader   = DataLoader(val_ds,   batch_size=BATCH_SIZE,
-                              shuffle=False, num_workers=0, pin_memory=False)
-
-    # ── Model ──────────────────────────────────────────────────────────────────
     model = smp.Unet(
-        encoder_name    = "resnet34",
-        encoder_weights = "imagenet",
-        in_channels     = 6,        # pre RGB + post RGB
-        classes         = 1,        # binary damage mask
-        activation      = None,     # raw logits — loss handles sigmoid
-    ).to(device)
+        encoder_name="resnet34", encoder_weights=None,
+        in_channels=6, classes=1, activation=None,
+    ).to(DEVICE)
 
-    total_params = sum(p.numel() for p in model.parameters())
-    print(f"Model parameters: {total_params:,}")
+    optimizer = optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-4)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
+    bce_fn    = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([3.0]).to(DEVICE))
 
-    # ── Optimizer & scheduler ──────────────────────────────────────────────────
-    optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-4)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=EPOCHS, eta_min=1e-6
-    )
-    criterion = CombinedLoss().to(device)
-
-    # ── Training ───────────────────────────────────────────────────────────────
-    train_losses, val_losses, val_ious = [], [], []
-    best_val_loss = float("inf")
-    best_epoch    = 0
-
-    print(f"\n{'Epoch':>5}  {'Train':>8}  {'Val':>8}  {'IoU':>6}  {'F1':>6}  {'LR':>8}  {'Time':>6}")
-    print("─" * 60)
+    best_val = float("inf")
 
     for epoch in range(1, EPOCHS + 1):
-        t0 = time.time()
-
-        train_loss           = train_one_epoch(model, train_loader, optimizer, criterion, device)
-        val_loss, val_metrics = validate(model, val_loader, criterion, device)
+        # — Train —
+        model.train()
+        t_loss, t_n = 0.0, 0
+        for x, y in train_dl:
+            x, y = x.to(DEVICE), y.to(DEVICE)
+            optimizer.zero_grad()
+            pred = model(x)
+            loss = bce_fn(pred, y) + dice_loss(pred, y)
+            loss.backward()
+            optimizer.step()
+            t_loss += loss.item() * x.size(0)
+            t_n    += x.size(0)
         scheduler.step()
 
-        train_losses.append(train_loss)
-        val_losses.append(val_loss)
-        val_ious.append(val_metrics["iou"])
+        # — Validate —
+        model.eval()
+        v_loss, v_n, v_iou = 0.0, 0, 0.0
+        with torch.no_grad():
+            for x, y in val_dl:
+                x, y  = x.to(DEVICE), y.to(DEVICE)
+                pred  = model(x)
+                loss  = bce_fn(pred, y) + dice_loss(pred, y)
+                v_loss += loss.item() * x.size(0)
+                v_n    += x.size(0)
+                # IoU
+                p = (torch.sigmoid(pred) > 0.5).float()
+                inter = (p * y).sum().item()
+                union = (p + y).clamp(0,1).sum().item()
+                v_iou += inter / max(union, 1)
+        val_loss = v_loss / v_n
+        val_iou  = v_iou / len(val_dl)
 
-        elapsed = time.time() - t0
-        lr_now  = scheduler.get_last_lr()[0]
-        marker  = " ✓" if val_loss < best_val_loss else ""
+        print(f"Epoch {epoch:3d}/{EPOCHS}  "
+              f"train_loss={t_loss/t_n:.4f}  "
+              f"val_loss={val_loss:.4f}  "
+              f"val_iou={val_iou:.3f}", flush=True)
 
-        print(f"{epoch:>5}  {train_loss:>8.4f}  {val_loss:>8.4f}  "
-              f"{val_metrics['iou']:>6.3f}  {val_metrics['f1']:>6.3f}  "
-              f"{lr_now:>8.2e}  {elapsed:>5.1f}s{marker}")
+        if val_loss < best_val:
+            best_val = val_loss
+            torch.save({"epoch": epoch, "model_state": model.state_dict(),
+                        "val_loss": val_loss, "val_iou": val_iou}, MODEL_OUT)
+            print(f"  ✓ saved best checkpoint (val_loss={val_loss:.4f})", flush=True)
 
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            best_epoch    = epoch
-            torch.save({
-                "epoch":      epoch,
-                "model_state": model.state_dict(),
-                "optimizer_state": optimizer.state_dict(),
-                "val_loss":   val_loss,
-                "val_iou":    val_metrics["iou"],
-                "val_f1":     val_metrics["f1"],
-                "hparams": {
-                    "encoder":     "resnet34",
-                    "in_channels": 6,
-                    "focal_alpha": FOCAL_ALPHA,
-                    "focal_gamma": FOCAL_GAMMA,
-                    "lr":          LR,
-                    "batch_size":  BATCH_SIZE,
-                },
-            }, CKPT_PATH)
-
-    print(f"\nBest checkpoint: epoch {best_epoch}  "
-          f"val_loss={best_val_loss:.4f}  "
-          f"val_iou={val_ious[best_epoch-1]:.3f}")
-    print(f"Saved → {CKPT_PATH}")
-
-    plot_curves(train_losses, val_losses, val_ious, CURVE_PATH)
+    print(f"\n[train] Done. Best val_loss={best_val:.4f}  →  {MODEL_OUT}")
 
 
 if __name__ == "__main__":
-    main()
+    train()
