@@ -29,9 +29,8 @@ ENV/
 .ipynb_checkpoints/
 *.ipynb_checkpoints
 
-# Data & models (large files)
+# Data (large / sensitive files — kept out of git)
 data/
-models/
 *.tif
 *.tiff
 *.geojson
@@ -40,9 +39,10 @@ models/
 *.dbf
 *.prj
 *.h5
-*.pt
-*.pth
 *.ckpt
+
+# Model checkpoints tracked via Git LFS (see .gitattributes)
+# *.pt and *.pth are intentionally NOT ignored here
 
 # Credentials & secrets
 credentials.json
