@@ -7,14 +7,14 @@ const CITIES = [
   {
     label: "Kharkiv, Ukraine",
     coords: "49.9935,36.2304",
-    startDate: "2021-10-01",
-    endDate: "2023-08-31",
+    startDate: "2022-03-01",
+    endDate: "2022-08-31",
   },
   {
     label: "Mariupol, Ukraine",
-    coords: "47.0951,37.5397",
-    startDate: "2021-10-01",
-    endDate: "2023-08-31",
+    coords: "47.0966,37.5416",
+    startDate: "2022-03-01",
+    endDate: "2022-08-31",
   },
 ] as const;
 
@@ -33,6 +33,18 @@ export function LandingScreen() {
       .then(() => setApiOnline(true))
       .catch(() => setApiOnline(false));
   }, []);
+
+  // Demo auto-fill: ?demo=kharkiv or ?demo=mariupol
+  useEffect(() => {
+    const demo = new URLSearchParams(window.location.search).get("demo");
+    if (!demo) return;
+    const city = CITIES.find((c) => c.label.toLowerCase().includes(demo.toLowerCase())) ?? null;
+    if (city) {
+      setSelectedCity(city);
+      setStartDate(city.startDate);
+      setEndDate(city.endDate);
+    }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleCityChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
     const city = CITIES.find((c) => c.coords === e.target.value) ?? null;

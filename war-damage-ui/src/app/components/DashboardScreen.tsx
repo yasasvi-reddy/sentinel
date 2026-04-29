@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useLocation, useNavigate } from "react-router";
 import { ArrowLeft } from "lucide-react";
 import { DamageMap } from "./DamageMap";
@@ -75,9 +75,21 @@ function convertZones(apiResult: AnalyzeResponse, endDate: string): DamageRegion
 export function DashboardScreen() {
   const location = useLocation();
   const navigate = useNavigate();
-  const { loc, startDate, endDate, apiResult } = location.state || {} as {
-    loc: string; startDate: string; endDate: string; apiResult: AnalyzeResponse;
+  const { loc, startDate, endDate } = location.state || {} as {
+    loc: string; startDate: string; endDate: string;
   };
+
+  // apiResult is stored in sessionStorage to avoid the ~640 KB History API
+  // state limit on Safari, which silently kills history.pushState() above it.
+  const raw = sessionStorage.getItem("sentinelApiResult");
+  const apiResult: AnalyzeResponse | null = raw ? JSON.parse(raw) : null;
+
+  // Guard: if someone navigates directly to /results without running the pipeline, redirect home.
+  useEffect(() => {
+    if (!apiResult) navigate("/", { replace: true });
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  if (!apiResult) return null;
 
   const allRegions: DamageRegion[] = apiResult ? convertZones(apiResult, endDate) : [];
 

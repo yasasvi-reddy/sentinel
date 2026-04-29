@@ -1,0 +1,136 @@
+1
+00:00:01,417 --> 00:00:06,967
+Welcome to Sentinel — an automated war damage detection
+system built at the University of Florida.
+
+2
+00:00:08,708 --> 00:00:22,078
+Sentinel uses freely available Sentinel-2 satellite imagery
+from the European Space Agency — freely available at 10
+metres per pixel — to detect and quantify the destruction of
+civilian infrastructure in active conflict zones.
+
+3
+00:00:23,824 --> 00:00:40,074
+The pipeline has five stages. Stage one: acquisition.
+Sentinel-2 multispectral imagery is fetched from Google
+Earth Engine for two time windows — a pre-war baseline and a
+post-conflict analysis window. Cloud masking is applied via
+the QA60 quality band.
+
+4
+00:00:41,722 --> 00:00:58,142
+Stage two: preprocessing. The full satellite image is sliced
+into overlapping 256 by 256 pixel patches, normalised to
+reflectance values, and stacked into six-channel tensors
+that pair the pre-war and post-war RGB bands side by side.
+
+5
+00:00:59,883 --> 00:01:16,623
+Stage three: inference. A U-Net with a ResNet-34 encoder
+runs sliding-window segmentation across the entire image,
+producing full-resolution probability maps. A Vision
+Transformer then classifies each region as undamaged, newly
+damaged, or pre-existing damage.
+
+6
+00:01:18,303 --> 00:01:33,183
+Stage four: the FastAPI backend vectorises the damage label
+map into geo-referenced polygons and caches the result to
+disk, so repeat queries return in under one second. Stage
+five: a React frontend renders everything on an interactive
+canvas.
+
+7
+00:01:38,351 --> 00:01:41,281
+Let's see it live. Here is the Sentinel interface.
+
+8
+00:01:43,514 --> 00:01:48,664
+The green live-data indicator confirms the FastAPI backend
+is online and all models are loaded.
+
+9
+00:01:50,443 --> 00:01:57,523
+I'll select Kharkiv, Ukraine — a city that experienced
+intense urban warfare starting in February 2022.
+
+10
+00:01:59,908 --> 00:02:06,828
+The date range is pre-populated: March through August 2022,
+covering the first six months of the conflict.
+
+11
+00:02:09,155 --> 00:02:13,635
+Let me flag hospitals and schools as the infrastructure
+types we want to highlight.
+
+12
+00:02:20,502 --> 00:02:27,212
+Clicking Analyze. Because Kharkiv is a pre-cached location,
+the full pipeline result returns almost instantly.
+
+13
+00:02:32,446 --> 00:02:42,846
+The loading screen steps through each pipeline stage — cloud
+masking, U-Net segmentation, ViT temporal classification,
+zone vectorisation, and report generation.
+
+14
+00:02:45,198 --> 00:02:58,688
+And here are the results. The satellite map shows post-war
+Kharkiv with the damage mask overlaid. Red zones mark areas
+newly damaged since the conflict began. Orange zones
+indicate pre-existing damage already present before the war.
+
+15
+00:03:00,280 --> 00:03:12,120
+The metrics panel shows 2,266 damage zones flagged across
+the city, with over 69,000 newly damaged pixels and more
+than 1.1 million pixels of pre-existing damage.
+
+16
+00:03:14,789 --> 00:03:22,129
+You can click any damage zone to open a detail popup showing
+its classification, confidence score, and geo-coordinates.
+
+17
+00:03:25,670 --> 00:03:35,980
+The confidence threshold slider on the left filters zones in
+real time. Raising it removes lower-confidence predictions
+and focuses the map on the areas the model is most certain
+about.
+
+18
+00:03:48,659 --> 00:03:55,279
+Now let me show you Mariupol — a port city that suffered
+some of the most intense urban destruction of the entire
+conflict.
+
+19
+00:04:01,102 --> 00:04:11,732
+Mariupol shows over 23 percent of surveyed pixels with some
+form of damage — compared to 18 percent for Kharkiv —
+reflecting the near-total urban destruction the city
+experienced.
+
+20
+00:04:13,404 --> 00:04:31,424
+On the evaluation side, the balanced U-Net checkpoint
+achieves a Mean I-o-U of 0.838 on the combined test set,
+with 91.4 percent overall pixel accuracy. Damaged pixel
+recall is 96.5 percent — the model catches almost all real
+damage with very few misses.
+
+21
+00:04:33,078 --> 00:04:46,428
+Kharkiv scores a Mean I-o-U of 0.849. Mariupol is lower at
+0.673, reflecting the smaller amount of Mariupol training
+data — an area for continued improvement as more imagery
+becomes available.
+
+22
+00:04:48,095 --> 00:04:58,825
+Sentinel is open source, built on PyTorch, FastAPI, and
+React, and designed to scale to any conflict zone where
+Sentinel-2 imagery is available. Thank you for watching.

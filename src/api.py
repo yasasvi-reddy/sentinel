@@ -23,7 +23,9 @@ Run with:
 """
 
 import base64
+import hashlib
 import io
+import json
 import sys
 import zipfile
 import calendar
@@ -82,6 +84,7 @@ MIN_VALID    = 0.05
 
 # Pre-downloaded imagery fallback
 IMAGERY_DIR  = ROOT / "data" / "imagery" / "geotiffs"
+CACHE_DIR    = ROOT / "data" / "cache"
 CITIES = {
     "kharkiv":  (49.9935, 36.2304),   # lat, lng
     "mariupol": (47.0966, 37.5416),
@@ -498,6 +501,27 @@ def _temporal_progression(aoi, start: str, end: str,
     return points
 
 
+# ── Result cache ──────────────────────────────────────────────────────────────
+def _cache_key(req: AnalyzeRequest) -> str:
+    raw = f"{req.location}|{req.start_date}|{req.end_date}|{req.infrastructure_type}"
+    return hashlib.md5(raw.encode()).hexdigest()
+
+
+def _load_cache(key: str) -> Optional[dict]:
+    path = CACHE_DIR / f"{key}.json"
+    if path.exists():
+        print(f"[api] Cache hit: {key}", flush=True)
+        return json.loads(path.read_text())
+    return None
+
+
+def _save_cache(key: str, data: dict):
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    path = CACHE_DIR / f"{key}.json"
+    path.write_text(json.dumps(data))
+    print(f"[api] Result cached: {key}", flush=True)
+
+
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 @app.get("/health")
 def health():
@@ -513,6 +537,12 @@ def health():
 
 @app.post("/analyze", response_model=AnalyzeResponse)
 def analyze(req: AnalyzeRequest):
+    # Return cached result immediately if available
+    cache_key = _cache_key(req)
+    cached = _load_cache(cache_key)
+    if cached is not None:
+        return AnalyzeResponse(**cached)
+
     try:
         lat, lng = [float(v.strip()) for v in req.location.split(",")]
     except Exception:
@@ -529,11 +559,18 @@ def analyze(req: AnalyzeRequest):
     pre_start = (t_start - timedelta(days=365)).strftime("%Y-%m-%d")
     pre_end   = (t_start - timedelta(days=1)  ).strftime("%Y-%m-%d")
 
-    # Try live GEE fetch; fall back to pre-downloaded GeoTIFFs on any failure
     pre_arr = post_arr = pre_tf = post_tf = None
     gee_error = None
+    aoi = None
 
-    if GEE_OK:
+    # Prefer local GeoTIFFs — full resolution, instant, no network.
+    # GEE is only used when local files don't cover the requested location/period.
+    local = _load_local_imagery(lat, lng, req.end_date)
+    if local is not None:
+        pre_arr, pre_tf, post_arr, post_tf = local
+        print(f"[api] Using local GeoTIFFs for ({lat},{lng})", flush=True)
+
+    if pre_arr is None and GEE_OK:
         try:
             delta = 0.15
             aoi = ee.Geometry.Rectangle([lng - delta, lat - delta, lng + delta, lat + delta])
@@ -541,15 +578,17 @@ def analyze(req: AnalyzeRequest):
             post_arr, post_tf, _ = _download_as_array(_s2_composite(aoi, req.start_date, req.end_date), aoi)
         except Exception as e:
             gee_error = str(e)
-            print(f"[warn] GEE fetch failed ({e}), trying local fallback", file=sys.stderr, flush=True)
+            print(f"[warn] GEE fetch failed ({e})", file=sys.stderr, flush=True)
 
     if pre_arr is None:
-        local = _load_local_imagery(lat, lng, req.end_date)
-        if local is None:
-            detail = f"GEE fetch failed ({gee_error}) and no local imagery for this location" \
-                     if gee_error else "GEE not available and no local imagery for this location"
-            raise HTTPException(502, detail)
-        pre_arr, pre_tf, post_arr, post_tf = local
+        detail = f"GEE fetch failed ({gee_error}) and no local imagery for this location" \
+                 if gee_error else "GEE not available and no local imagery for this location"
+        raise HTTPException(502, detail)
+
+    # Build AOI for temporal progression (needed even when imagery came from local files)
+    if aoi is None and GEE_OK:
+        delta = 0.15
+        aoi = ee.Geometry.Rectangle([lng - delta, lat - delta, lng + delta, lat + delta])
 
     try:
         label_map = _run_pipeline(pre_arr, post_arr)
@@ -578,7 +617,7 @@ def analyze(req: AnalyzeRequest):
     else:
         temporal = []
 
-    return AnalyzeResponse(
+    response = AnalyzeResponse(
         damage_zones=damage_zones,
         metrics={
             "zones_flagged":   len(damage_zones),
@@ -592,3 +631,8 @@ def analyze(req: AnalyzeRequest):
         post_image_b64=post_image_b64,
         mask_b64=mask_b64,
     )
+    try:
+        _save_cache(cache_key, response.model_dump())
+    except Exception as e:
+        print(f"[warn] cache write failed: {e}", file=sys.stderr)
+    return response

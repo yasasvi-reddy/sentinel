@@ -22,33 +22,43 @@ export function LoadingScreen() {
   const [currentStep, setCurrentStep] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [apiResult, setApiResult] = useState<AnalyzeResponse | null>(null);
+  const [elapsed, setElapsed] = useState(0);
+  const [minTimeDone, setMinTimeDone] = useState(false);
   const calledRef = useRef(false);
 
-  // Drive navigation from a useEffect so it fires inside React's lifecycle,
-  // where React Router v7's data router reliably processes it.
+  // Elapsed-time counter — gives the user honest feedback during the long inference wait
   useEffect(() => {
-    if (!apiResult) return;
-    console.log("[LoadingScreen] apiResult received, scheduling navigation", apiResult);
-    const timer = setTimeout(() => {
-      console.log("[LoadingScreen] navigating to /results");
-      navigate("/results", { state: { loc, startDate, endDate, apiResult } });
-    }, 600);
-    return () => clearTimeout(timer);
-  }, [apiResult]); // eslint-disable-line react-hooks/exhaustive-deps
+    const t = setInterval(() => setElapsed((s) => s + 1), 1000);
+    return () => clearInterval(t);
+  }, []);
+
+  // Minimum display time — ensures the loading screen shows for at least 3.5s
+  useEffect(() => {
+    const t = setTimeout(() => setMinTimeDone(true), 3500);
+    return () => clearTimeout(t);
+  }, []);
+
+  // Navigate only when the API has responded AND the minimum display time has elapsed.
+  useEffect(() => {
+    if (!apiResult || !minTimeDone) return;
+    navigate("/results", { state: { loc, startDate, endDate } });
+  }, [apiResult, minTimeDone]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (calledRef.current) return;
     calledRef.current = true;
 
-    // Advance the visual step ticker independently of the real API call
+    // Advance the visual step ticker independently of the real API call.
+    // Stops at STEPS.length - 2 (83%) — the final step only completes when
+    // the API actually responds, so the bar never freezes at 100%.
     let step = 0;
     const ticker = setInterval(() => {
-      if (step < STEPS.length - 1) {
+      if (step < STEPS.length - 2) {
         setCompletedSteps((prev) => [...prev, STEPS[step]]);
         step++;
         setCurrentStep(step);
       }
-    }, 2500);
+    }, 500);
 
     const infraType = selectedInfrastructure?.length > 0
       ? selectedInfrastructure.join(",").toLowerCase()
@@ -61,9 +71,10 @@ export function LoadingScreen() {
       infrastructure_type: infraType,
     })
       .then((result) => {
-        console.log("[LoadingScreen] API call succeeded", result);
         clearInterval(ticker);
-        // Flush remaining steps instantly, then signal the navigation effect
+        // Cache result in sessionStorage — keeps it out of history.pushState()
+        // which has a ~640 KB limit on Safari and silently fails above it.
+        sessionStorage.setItem("sentinelApiResult", JSON.stringify(result));
         setCompletedSteps(STEPS.slice(0, -1));
         setCurrentStep(STEPS.length - 1);
         setApiResult(result);
@@ -165,16 +176,31 @@ export function LoadingScreen() {
                 </div>
               </motion.div>
             ) : currentStep < STEPS.length && (
-              <motion.div
-                initial={{ opacity: 0 }}
-                animate={{ opacity: [0.4, 1, 0.4] }}
-                transition={{ duration: 1, repeat: Infinity }}
-                className="flex items-start gap-3"
-                style={{ color: 'var(--sentinel-text-primary)' }}
-              >
-                <span className="text-xs" style={{ color: 'var(--sentinel-undamaged)' }}>&gt;</span>
-                <span className="text-sm" style={{ fontFamily: 'var(--font-sans)' }}>{STEPS[currentStep]}</span>
-              </motion.div>
+              <div>
+                <motion.div
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: [0.4, 1, 0.4] }}
+                  transition={{ duration: 1, repeat: Infinity }}
+                  className="flex items-start gap-3"
+                  style={{ color: 'var(--sentinel-text-primary)' }}
+                >
+                  <span className="text-xs" style={{ color: 'var(--sentinel-undamaged)' }}>&gt;</span>
+                  <span className="text-sm" style={{ fontFamily: 'var(--font-sans)' }}>{STEPS[currentStep]}</span>
+                </motion.div>
+                {/* Show elapsed time once the ticker stops but API hasn't returned yet */}
+                {currentStep === STEPS.length - 2 && !apiResult && (
+                  <motion.div
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    transition={{ delay: 0.5 }}
+                    className="mt-3 ml-5 text-xs"
+                    style={{ color: 'var(--sentinel-text-muted)', fontFamily: 'var(--font-mono)' }}
+                  >
+                    Sliding-window inference in progress…&nbsp;&nbsp;
+                    {String(Math.floor(elapsed / 60)).padStart(2, "0")}:{String(elapsed % 60).padStart(2, "0")} elapsed
+                  </motion.div>
+                )}
+              </div>
             )}
           </div>
 

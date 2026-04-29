@@ -1,0 +1,20 @@
+============================================================
+U-NET EVALUATION REPORT
+Checkpoint : unet_resnet34_best.pth
+Test split : 7 patches  (seed=42, 20% holdout)
+Device     : mps
+============================================================
+
+Class                IoU  Precision   Recall       F1    Support
+------------------------------------------------------------
+Undamaged         0.7824     0.9753   0.7982   0.8779    282,714
+Damaged           0.7308     0.7491   0.9675   0.8444    176,038
+------------------------------------------------------------
+Mean IoU          0.7566
+Overall Acc       0.8632
+
+Confusion Matrix (rows=Actual, cols=Predicted):
+               Undamaged    Damaged
+  Undamaged     225,670     57,044
+  Damaged         5,713    170,325
+============================================================

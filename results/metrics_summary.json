@@ -1,0 +1,86 @@
+{
+  "test_split": {
+    "seed": 42,
+    "holdout_pct": 20,
+    "total_patches": 7,
+    "kharkiv_patches": 5,
+    "mariupol_patches": 2
+  },
+  "baseline_checkpoint": {
+    "file": "unet_resnet34_best.pth",
+    "epoch": 30,
+    "val_loss": 0.6379,
+    "val_iou": 0.799
+  },
+  "balanced_checkpoint": {
+    "file": "unet_resnet34_balanced.pth",
+    "epoch": 34,
+    "val_loss": 0.4128,
+    "val_iou": 0.848
+  },
+  "balanced_model_results": {
+    "kharkiv": {
+      "mean_iou": 0.8492,
+      "overall_accuracy": 0.9187,
+      "undamaged": {
+        "iou": 0.8415,
+        "precision": 0.9729,
+        "recall": 0.8617,
+        "f1": 0.9140
+      },
+      "damaged": {
+        "iou": 0.8568,
+        "precision": 0.8753,
+        "recall": 0.9759,
+        "f1": 0.9229
+      }
+    },
+    "mariupol": {
+      "mean_iou": 0.6731,
+      "overall_accuracy": 0.9037,
+      "undamaged": {
+        "iou": 0.8954,
+        "precision": 0.9794,
+        "recall": 0.9126,
+        "f1": 0.9448
+      },
+      "damaged": {
+        "iou": 0.4508,
+        "precision": 0.5002,
+        "recall": 0.8200,
+        "f1": 0.6214
+      }
+    },
+    "combined": {
+      "mean_iou": 0.8381,
+      "overall_accuracy": 0.9144,
+      "undamaged": {
+        "iou": 0.8641,
+        "precision": 0.9757,
+        "recall": 0.8830,
+        "f1": 0.9271
+      },
+      "damaged": {
+        "iou": 0.8122,
+        "precision": 0.8370,
+        "recall": 0.9647,
+        "f1": 0.8964
+      }
+    }
+  },
+  "full_image_inference": {
+    "kharkiv": {
+      "total_pixels": 6928110,
+      "undamaged_pct": 81.9,
+      "newly_damaged_pct": 1.0,
+      "pre_existing_pct": 17.1,
+      "zones_flagged": 2266
+    },
+    "mariupol": {
+      "total_pixels": 828705,
+      "undamaged_pct": 76.7,
+      "newly_damaged_pct": 2.4,
+      "pre_existing_pct": 20.9
+    }
+  }
+}

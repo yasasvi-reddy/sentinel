@@ -1,56 +1,38 @@
 # Sentinel
 
-Automated detection of war damage to civilian infrastructure using satellite imagery and deep learning.
-
-Sentinel ingests freely available multispectral satellite imagery and tracks destruction of hospitals, schools, and water systems in active conflict zones. It uses a U-Net CNN for pixel-level damage segmentation and a Vision Transformer for temporal change tracking across image sequences.
+Sentinel is an automated war damage detection system that quantifies destruction of civilian infrastructure using freely available Sentinel-2 satellite imagery and deep learning. Given a location and date range, Sentinel downloads pre- and post-conflict multispectral composites from Google Earth Engine, segments damage at the pixel level using a U-Net, classifies change temporally with a Vision Transformer, and serves the results through an interactive React map with polygon-level zone inspection. It was built to give humanitarian analysts, journalists, and aid organizations an objective, reproducible measure of conflict impact on hospitals, schools, and essential services.
 
 Built for EGN 6217 Applied Deep Learning, University of Florida, Spring 2025.
 
 ---
 
-## What it does
+## Architecture
 
-- Pulls Sentinel-2 satellite imagery for any location via Google Earth Engine
-- Segments damage at the pixel level using a trained U-Net model
-- Tracks how damage progresses over time using a Vision Transformer
-- Displays results as an interactive map with a damage progression report via Streamlit
+Satellite imagery is fetched from the Copernicus Sentinel-2 archive via Google Earth Engine and preprocessed into overlapping 256 × 256 patches. A U-Net with a ResNet-34 encoder runs sliding-window inference across both pre- and post-war composites to produce full-resolution damage probability maps. A TemporalViT then compares the two probability maps patch-by-patch to classify each region as undamaged, newly damaged, or pre-existing damage. Results are vectorised into geo-referenced polygons and served through a FastAPI backend to a React frontend. See `docs/architecture.md` for full details.
 
 ---
 
-## Project structure
+## Performance
 
-```
-sentinel/
-├── data/                  # Raw and processed datasets
-├── notebooks/             # Jupyter notebooks for exploration and training
-├── src/                   # Pipeline scripts (data loading, preprocessing, model)
-├── ui/                    # Streamlit demo app
-├── models/                # Saved model checkpoints
-├── results/               # Output plots and evaluation results
-├── docs/                  # Architecture diagrams and project visuals
-├── requirements.txt       # Python dependencies
-└── README.md
-```
+Evaluated on a held-out 20% test split (seed=42), balanced checkpoint `unet_resnet34_balanced.pth`:
 
----
+| Metric | Kharkiv | Mariupol | Combined |
+|---|---|---|---|
+| Mean IoU | 0.849 | 0.673 | **0.838** |
+| Overall Accuracy | 91.9% | 90.4% | **91.4%** |
+| Damaged Precision | 87.5% | 50.0% | 83.7% |
+| Damaged Recall | **97.6%** | **82.0%** | **96.5%** |
+| Damaged F1 | 92.3% | 62.1% | 89.6% |
 
-## Dataset
-
-**Phase 1 (current):** Kaggle Semantic Segmentation of Aerial Imagery dataset
-- Source: `humansintheloop/semantic-segmentation-of-aerial-imagery`
-- 8 aerial image tiles with paired pixel-level segmentation masks
-- Used to train and validate the U-Net backbone
-
-**Phase 2:** Sentinel-2 imagery via Google Earth Engine + Copernicus EMS damage labels
-- Free access with a Google Earth Engine student account
-- Damage labels from Copernicus Emergency Management Service and UNOSAT
-- Covers Ukraine, Gaza, Turkey conflict activations
+Full per-class metrics: `results/eval_compare_report.txt`
+Confusion matrix: `results/confusion_matrix.png`
+Loss curves: `results/loss_curves.png`
 
 ---
 
 ## Setup
 
-**Requirements:** Python 3.10+, pip
+**Requirements:** Python 3.10+, Node.js 18+
 
 ```bash
 git clone https://github.com/yasasvi-reddy/sentinel
@@ -60,55 +42,102 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-**For Google Earth Engine access (Phase 2):**
+**Optional — Google Earth Engine (for new locations):**
 ```bash
 earthengine authenticate
 ```
-Follow the browser prompt. You will need a free GEE account registered at earthengine.google.com.
+Without GEE, the system falls back to pre-downloaded GeoTIFFs for Kharkiv and Mariupol.
 
 ---
 
-## Running the notebook
-
-Open `notebooks/setup.ipynb` to verify environment setup, load the dataset, and view sample data:
+## Running the FastAPI backend
 
 ```bash
-jupyter notebook notebooks/setup.ipynb
+source venv/bin/activate
+uvicorn api:app --app-dir src --host 0.0.0.0 --port 8000 --loop asyncio
 ```
 
-The notebook covers:
-- Dataset loading and verification
-- Sample imagery and mask visualization
-- Basic dataset statistics
-- Environment check
+Health check:
+```bash
+curl http://localhost:8000/health
+```
 
 ---
 
-## Running the demo
+## Running the React frontend
 
 ```bash
-cd demo
-streamlit run app.py
+cd war-damage-ui
+npm install   # first time only
+npm run dev
 ```
 
-The demo lets you select a location, date range, and infrastructure type and returns a geo-referenced damage heatmap with a temporal progression chart.
+Open `http://localhost:5173`. Enter coordinates as `lat,lng` and a date range, then click **Analyze**.
+
+**Pre-cached locations (instant response, ~3 s loading screen):**
+
+| Location | Coordinates | Date range |
+|---|---|---|
+| Kharkiv, Ukraine | `49.9935,36.2304` | `2022-03-01` → `2022-08-31` |
+| Mariupol, Ukraine | `47.0966,37.5416` | `2022-03-01` → `2022-08-31` |
 
 ---
 
-## Technical approach
+## Evaluation notebook
 
-| Component | Architecture | Purpose |
-|-----------|-------------|---------|
-| Segmentation | U-Net with ResNet-34 encoder | Pixel-level damage detection |
-| Temporal modeling | Vision Transformer (ViT) | Multi-date change tracking |
-| Interface | Streamlit | Interactive demo |
-| Geospatial | rasterio, geopandas | Imagery and label processing |
-| Imagery | Sentinel-2 via GEE API | Free satellite data source |
+```bash
+jupyter notebook notebooks/evaluation.ipynb
+```
+
+Pre-run with all outputs. Loads the balanced checkpoint, runs the full test evaluation, and displays all metrics, confusion matrix, loss curves, and probability maps inline.
 
 ---
 
-## Author
+## Project structure
+
+```
+sentinel/
+├── src/                        # Python pipeline and API
+│   ├── api.py                  # FastAPI backend (main entry point)
+│   ├── temporal_vit.py         # TemporalViT architecture
+│   ├── train.py                # U-Net training (baseline)
+│   ├── train_balanced.py       # U-Net training (balanced, production)
+│   ├── eval_unet.py            # Kharkiv evaluation
+│   ├── eval_mariupol.py        # Mariupol full inference + evaluation
+│   ├── eval_compare.py         # Side-by-side comparison of checkpoints
+│   └── plot_loss_curves.py     # Training history visualisation
+├── war-damage-ui/              # React + Vite frontend
+├── models/                     # Saved checkpoints (Git LFS)
+│   ├── unet_resnet34_best.pth          # Baseline U-Net
+│   ├── unet_resnet34_balanced.pth      # Balanced U-Net (production)
+│   └── temporal_vit_best.pth           # TemporalViT
+├── data/
+│   ├── imagery/geotiffs/       # Pre-downloaded Sentinel-2 GeoTIFFs
+│   ├── patches/                # 256×256 training patches
+│   └── cache/                  # Disk-cached API responses
+├── results/                    # Evaluation outputs and figures
+├── notebooks/                  # Jupyter evaluation notebook
+├── docs/                       # Architecture notes
+├── ui/                         # Legacy interface reference
+└── requirements.txt
+```
+
+---
+
+## Known issues
+
+**GEE authentication and temporal chart:** Google Earth Engine authentication can time out in restricted network environments. When GEE is unavailable the system falls back to local GeoTIFFs for Kharkiv and Mariupol; other locations will fail with a 502 error. The temporal progression chart on the dashboard requires GEE for monthly composite generation and will render empty without it.
+
+**ViT overfitting on small patch count:** The TemporalViT reached val_acc=1.000 after 13 epochs on 35 training patches, which almost certainly reflects overfitting rather than genuine generalisation. It operates as a patch-level classifier (one class per 256 × 256 patch) and spatial detail in the damage map comes entirely from the U-Net probability threshold, not the ViT.
+
+**Kharkiv pre-existing pixel inflation:** The pre-existing damage class (17.1% of Kharkiv pixels) is notably high compared to external damage assessments. This likely reflects radiometric differences between the Oct–Dec 2021 pre-war composite and the post-war images that the U-Net incorrectly interprets as structural change, rather than actual pre-conflict damage at that scale.
+
+**Geographic scope:** The system has only been validated on Kharkiv and Mariupol. Extending to new cities requires new local GeoTIFFs or an active GEE connection, and model performance on unseen geographies is untested.
+
+---
+
+## Contact
 
 Yasasvi Kaipa
-Master's in AI Systems, University of Florida
-yasasvikaipa7@gmail.com
+University of Florida
+yasasvikaipa@ufl.edu

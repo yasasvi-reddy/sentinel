@@ -1,0 +1,24 @@
+============================================================
+U-NET EVALUATION REPORT — MARIUPOL
+Checkpoint   : unet_resnet34_best.pth
+Ckpt epoch   : 30  val_loss=0.6379  val_iou=0.799
+Dataset      : Mariupol patches only (7 total)
+Test split   : 1 patches  (seed=42, 20% holdout)
+Device       : mps
+============================================================
+
+Class                IoU  Precision   Recall       F1    Support
+------------------------------------------------------------
+Undamaged         0.6014     0.9855   0.6067   0.7511     54,287
+Damaged           0.3302     0.3352   0.9570   0.4965     11,249
+------------------------------------------------------------
+Mean IoU          0.4658
+Overall Acc       0.6668
+
+Confusion Matrix (rows=Actual, cols=Predicted):
+               Undamaged    Damaged
+  Undamaged      32,937     21,350
+  Damaged           484     10,765
+
+Note: only 7 Mariupol patches available; test set is 1 patch(es).
+============================================================

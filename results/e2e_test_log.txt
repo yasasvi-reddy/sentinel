@@ -1,0 +1,22 @@
+=== SENTINEL E2E TEST ===
+Timestamp     : 2026-04-27T01:43:37.376358Z
+Location      : 49.9935,36.2304 (Kharkiv)
+Date range    : 2022-03-01 to 2022-08-31
+
+--- Response ---
+zones_flagged : 2266
+newly_damaged : 69456 px
+pre_existing  : 1182993 px
+images_analyzed: 2
+damage_zones  : 2266 polygons returned
+post_image_b64: present (665724 chars)
+mask_b64      : present (10772 chars)
+temporal_pts  : 6
+
+--- Sample zone ---
+  label       : Newly damaged
+  damage_class: 1
+  confidence  : 1.0
+  polygon pts : 117
+
+STATUS: PASS
